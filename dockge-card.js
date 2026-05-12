@@ -111,10 +111,45 @@ class DockgeCard extends HTMLElement {
   }
 
   _getGlobalSummary() {
+    // Multi-agent setups: the integration emits a real global_summary entity.
     for (const id in this._hass.states) {
       if (id.match(/^sensor\.dockge_server_.*_global_summary$/)) return this._hass.states[id];
     }
-    return null;
+    // Single-agent setups don't get a global_summary (the integration only
+    // emits one when multi_agent=true). Synthesize an equivalent shape from
+    // the per-agent _summary entities so the card renders identically.
+    return this._buildSyntheticGlobalSummary();
+  }
+
+  _buildSyntheticGlobalSummary() {
+    const agents = {};
+    let total_containers = 0;
+    let running_containers = 0;
+    let found = false;
+
+    for (const id in this._hass.states) {
+      if (!id.match(/^sensor\.dockge_server_.+_summary$/)) continue;
+      if (id.endsWith('_global_summary')) continue;
+      const s = this._hass.states[id];
+      if (!s || !s.attributes || !Array.isArray(s.attributes.stacks)) continue;
+
+      const serverName = s.attributes.agent_name;
+      if (!serverName) continue;
+
+      const tc = parseInt(s.attributes.total_containers, 10) || 0;
+      const rc = parseInt(s.attributes.running_containers, 10) || 0;
+      total_containers += tc;
+      running_containers += rc;
+      agents[serverName] = {
+        stacks: s.attributes.stacks,
+        running_containers: rc,
+        total_containers: tc,
+      };
+      found = true;
+    }
+
+    if (!found) return null;
+    return { attributes: { agents, total_containers, running_containers } };
   }
 
   _getUpdatesAvailable(serverName) {
