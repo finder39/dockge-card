@@ -12,7 +12,7 @@ A custom Lovelace card for the [Dockge Home Assistant integration](https://githu
 - **Multi-server support** — shows all connected Dockge agents
 - **Stack actions** — start, stop, restart, update, and check for updates via popup
 - **Processing indicator** — blue pulsing icon when a stack operation is in progress
-- **Update tracking** — shows available image updates per stack and container
+- **Update tracking** — shows available image updates and optional OCI image versions per stack and container
 - **Custom icons** — override stack icons via card config
 - **Dark mode** — uses HA theme variables throughout
 
@@ -73,7 +73,7 @@ icons:
 When upgrading, update the `?v=` parameter in your resource URL to force browsers to load the new version:
 
 ```yaml
-- url: /hacsfiles/dockge-card/dockge-card.js?v=1.6.0
+- url: /hacsfiles/dockge-card/dockge-card.js?v=1.6.1
   type: module
 ```
 

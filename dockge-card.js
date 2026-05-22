@@ -3,7 +3,7 @@
  * Auto-discovers servers and stacks from Dockge HA entities.
  */
 
-const CARD_VERSION = '1.6.0';
+const CARD_VERSION = '1.6.1';
 
 // Global popup state — survives card element re-creation by HA/bubble
 if (!window.__dockgePopup) {
@@ -195,7 +195,7 @@ class DockgeCard extends HTMLElement {
                   <td>${a.container_name || '?'}</td>
                   <td><span class="state-badge" style="--badge-color: ${color}">${c.state}</span></td>
                   <td class="uptime-cell">${a.status || '—'}</td>
-                  <td><code>${a.image_tag || '?'}</code></td>
+                  <td><code>${a.image_version || a.image_tag || '?'}</code></td>
                   <td class="update-cell">${a.update_available ? '⬆️' : '✓'}</td>
                 </tr>`;
               }).join('')}
