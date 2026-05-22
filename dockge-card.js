@@ -3,7 +3,7 @@
  * Auto-discovers servers and stacks from Dockge HA entities.
  */
 
-const CARD_VERSION = '1.6.0';
+const CARD_VERSION = '1.6.1';
 
 // Global popup state — survives card element re-creation by HA/bubble
 if (!window.__dockgePopup) {
@@ -117,14 +117,100 @@ class DockgeCard extends HTMLElement {
     return null;
   }
 
+  _isContainerEntity(id, stateObj) {
+    return Boolean(
+      id.startsWith('sensor.') &&
+      stateObj.attributes &&
+      stateObj.attributes.stack_name &&
+      stateObj.attributes.agent_name &&
+      (
+        stateObj.attributes.icon === 'mdi:docker' ||
+        stateObj.attributes.container_name ||
+        stateObj.attributes.image
+      )
+    );
+  }
+
+  _getDiscoveredAgents() {
+    const globalSummary = this._getGlobalSummary();
+    if (globalSummary && globalSummary.attributes.agents) return globalSummary.attributes.agents;
+
+    const agents = {};
+    for (const id in this._hass.states) {
+      const s = this._hass.states[id];
+      if (!this._isContainerEntity(id, s)) continue;
+
+      const agentName = s.attributes.agent_name;
+      const stackName = s.attributes.stack_name;
+      if (!agents[agentName]) {
+        agents[agentName] = {
+          stacks: [],
+          running_containers: 0,
+          total_containers: 0,
+        };
+      }
+
+      agents[agentName].total_containers += 1;
+      if (s.state === 'running') agents[agentName].running_containers += 1;
+      if (!agents[agentName].stacks.includes(stackName)) agents[agentName].stacks.push(stackName);
+    }
+
+    return Object.keys(agents).length ? agents : null;
+  }
+
+  _getTotals(agents) {
+    const globalSummary = this._getGlobalSummary();
+    if (globalSummary) {
+      return {
+        total: globalSummary.attributes.total_containers || 0,
+        running: globalSummary.attributes.running_containers || 0,
+      };
+    }
+
+    let total = 0;
+    let running = 0;
+    for (const name in agents) {
+      total += agents[name].total_containers || 0;
+      running += agents[name].running_containers || 0;
+    }
+    return { total, running };
+  }
+
   _getUpdatesAvailable(serverName) {
     const slug = serverName.toLowerCase().replace(/[^a-z0-9]/g, '_');
+    for (const id in this._hass.states) {
+      const s = this._hass.states[id];
+      if (!id.startsWith('sensor.')) continue;
+      if (!id.includes('image_updates_available')) continue;
+      if (s.attributes && s.attributes.agent_name === serverName) {
+        return parseInt(s.state, 10) || 0;
+      }
+    }
+
     const entity = this._hass.states[`sensor.dockge_server_${slug}_image_updates_available`];
-    return entity ? parseInt(entity.state, 10) || 0 : 0;
+    if (entity) return parseInt(entity.state, 10) || 0;
+
+    const stacksWithUpdates = new Set();
+    for (const id in this._hass.states) {
+      const s = this._hass.states[id];
+      if (id.startsWith('update.') && s.attributes && s.attributes.agent_name === serverName && s.attributes.stack_name && s.state === 'on') {
+        stacksWithUpdates.add(s.attributes.stack_name);
+      }
+      if (this._isContainerEntity(id, s) && s.attributes.agent_name === serverName && s.attributes.update_available === true) {
+        stacksWithUpdates.add(s.attributes.stack_name);
+      }
+    }
+    return stacksWithUpdates.size;
   }
 
   _getVersion(serverName) {
     const slug = serverName.toLowerCase().replace(/[^a-z0-9]/g, '_');
+    for (const id in this._hass.states) {
+      const s = this._hass.states[id];
+      if (id.startsWith('sensor.') && id.includes('_version') && s.attributes && s.attributes.agent_name === serverName) {
+        return s.state;
+      }
+    }
     const entity = this._hass.states[`sensor.dockge_server_${slug}_version`];
     return entity ? entity.state : null;
   }
@@ -133,7 +219,7 @@ class DockgeCard extends HTMLElement {
     const containers = [];
     for (const id in this._hass.states) {
       const s = this._hass.states[id];
-      if (s.attributes && s.attributes.stack_name === stackName && s.attributes.agent_name === serverName && s.attributes.icon === 'mdi:docker' && id.startsWith('sensor.')) {
+      if (this._isContainerEntity(id, s) && s.attributes.stack_name === stackName && s.attributes.agent_name === serverName) {
         containers.push(s);
       }
     }
@@ -151,17 +237,30 @@ class DockgeCard extends HTMLElement {
   _getAgentParam(serverName) {
     const globalEntity = this._getGlobalSummary();
     if (globalEntity && serverName === globalEntity.attributes.agent_name) return '';
+    const agents = this._getDiscoveredAgents();
+    if (agents && Object.keys(agents).length === 1) return '';
     return serverName;
   }
 
   _isStackProcessing(stackName, serverName) {
     for (const id in this._hass.states) {
-      if (!id.startsWith('binary_sensor.')) continue;
       const s = this._hass.states[id];
-      if (!s.attributes || s.attributes.processing !== true) continue;
-      if (s.attributes.stack_name === stackName && s.attributes.agent_name === serverName) return true;
+      if (!s.attributes || s.attributes.stack_name !== stackName || s.attributes.agent_name !== serverName) continue;
+      if (s.attributes.processing !== true && s.attributes.in_progress !== true) continue;
+      if (!id.startsWith('binary_sensor.') && !id.startsWith('update.')) continue;
+      return true;
     }
     return false;
+  }
+
+  _getStackUpdateEntityId(stackName, serverName) {
+    for (const id in this._hass.states) {
+      const s = this._hass.states[id];
+      if (!id.startsWith('update.')) continue;
+      if (!s.attributes) continue;
+      if (s.attributes.stack_name === stackName && s.attributes.agent_name === serverName) return id;
+    }
+    return null;
   }
 
   // ── Popup (appended to document.body to escape shadow DOM) ──
@@ -258,7 +357,10 @@ class DockgeCard extends HTMLElement {
         Update: 'update_stack',
       };
       const svc = serviceMap[selectedAction];
-      if (svc) {
+      const updateEntityId = selectedAction === 'Update' ? this._getStackUpdateEntityId(stackName, serverName) : null;
+      if (updateEntityId) {
+        this._hass.callService('update', 'install', { entity_id: updateEntityId });
+      } else if (svc) {
         const data = { stack_name: stackName };
         if (agentParam) data.agent = agentParam;
         this._hass.callService('dockge', svc, data);
@@ -292,21 +394,19 @@ class DockgeCard extends HTMLElement {
   _renderCard() {
     if (!this._hass || !this.shadowRoot) return;
 
-    const globalSummary = this._getGlobalSummary();
-    if (!globalSummary || !globalSummary.attributes.agents) {
+    const agents = this._getDiscoveredAgents();
+    if (!agents) {
       this.shadowRoot.innerHTML = `<ha-card><div style="padding:16px;text-align:center;color:var(--secondary-text-color);">No Dockge integration found.</div></ha-card>`;
       return;
     }
 
-    const agents = globalSummary.attributes.agents;
-    const total = globalSummary.attributes.total_containers || 0;
-    const running = globalSummary.attributes.running_containers || 0;
+    const { total, running } = this._getTotals(agents);
 
     let totalIssues = 0;
     let totalUpdates = 0;
     for (const id in this._hass.states) {
       const s = this._hass.states[id];
-      if (s.attributes && s.attributes.icon === 'mdi:docker' && id.startsWith('sensor.') && s.attributes.stack_name) {
+      if (this._isContainerEntity(id, s)) {
         if (s.state !== 'running') totalIssues++;
         if (s.attributes.health === 'unhealthy') totalIssues++;
       }
