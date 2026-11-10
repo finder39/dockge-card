@@ -13,6 +13,8 @@ A custom Lovelace card for the [Dockge Home Assistant integration](https://githu
 - **Stack actions** — start, stop, restart, update, and check for updates via popup
 - **Processing indicator** — blue pulsing icon when a stack operation is in progress
 - **Update tracking** — shows available image updates per stack and container
+- **Manual refresh** — a refresh button in the header makes the integration poll Dockge immediately (a "Refresh" chip when `show_header` is `false`)
+- **Respects `dockge.status.ignore`** — a service labelled `dockge.status.ignore: "true"` in its compose file (for example a one-shot init container that is meant to exit) no longer turns the stack red or counts as an issue, as long as Dockge's own status for the stack is `running`. Only `exited` containers are ever ignored.
 - **Custom icons** — override stack icons via card config
 - **Dark mode** — uses HA theme variables throughout
 

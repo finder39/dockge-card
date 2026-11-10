@@ -140,6 +140,28 @@ class DockgeCard extends HTMLElement {
     return containers.sort((a, b) => (a.attributes.container_name || '').localeCompare(b.attributes.container_name || ''));
   }
 
+  // Dockge's own stack status (stack-level binary_sensor, attribute `status`). Dockge leaves
+  // services labelled `dockge.status.ignore: true` out of it, so a stack whose status is plain
+  // "running" has no *relevant* exited containers. Keyed "<server>|<stack>".
+  _getStackStatuses() {
+    const statuses = {};
+    for (const id in this._hass.states) {
+      if (!id.startsWith('binary_sensor.')) continue;
+      const a = this._hass.states[id].attributes;
+      if (a && a.stack_name && a.agent_name && typeof a.status === 'string') {
+        statuses[`${a.agent_name}|${a.stack_name}`] = a.status;
+      }
+    }
+    return statuses;
+  }
+
+  // An exited container Dockge is told to ignore (e.g. a one-shot init job). Only "exited" is
+  // ever ignored: restarting/unhealthy/etc. containers still count.
+  _isIgnoredContainer(c, statuses) {
+    const a = c.attributes || {};
+    return c.state === 'exited' && statuses[`${a.agent_name}|${a.stack_name}`] === 'running';
+  }
+
   _getStackColor(containers) {
     if (containers.length === 0) return STATUS_COLORS.unknown;
     if (containers.some(c => c.attributes.health === 'unhealthy')) return STATUS_COLORS.unhealthy;
@@ -299,27 +321,39 @@ class DockgeCard extends HTMLElement {
     }
 
     const agents = globalSummary.attributes.agents;
-    const total = globalSummary.attributes.total_containers || 0;
+    // Ignored containers count towards neither side (they are not running, and not a problem).
+    // total/running are adjusted after the loop below has counted them.
+    let total = globalSummary.attributes.total_containers || 0;
     const running = globalSummary.attributes.running_containers || 0;
 
+    const statuses = this._getStackStatuses();
+    const ignoredByServer = {};
+    let ignoredTotal = 0;
     let totalIssues = 0;
     let totalUpdates = 0;
     for (const id in this._hass.states) {
       const s = this._hass.states[id];
       if (s.attributes && s.attributes.icon === 'mdi:docker' && id.startsWith('sensor.') && s.attributes.stack_name) {
+        if (this._isIgnoredContainer(s, statuses)) {
+          ignoredTotal++;
+          ignoredByServer[s.attributes.agent_name] = (ignoredByServer[s.attributes.agent_name] || 0) + 1;
+          continue;
+        }
         if (s.state !== 'running') totalIssues++;
         if (s.attributes.health === 'unhealthy') totalIssues++;
       }
     }
+    total -= ignoredTotal;
     for (const name in agents) totalUpdates += this._getUpdatesAvailable(name);
 
     let html = `<style>${this._getCardStyles()}</style>`;
 
     if (this._config.show_header !== false) {
-      html += `<div class="header"><div class="header-icon"><ha-icon icon="mdi:docker"></ha-icon></div><div class="header-info"><div class="header-title">Docker</div><div class="header-subtitle">${running}/${total} running</div></div></div>`;
+      html += `<div class="header"><div class="header-icon"><ha-icon icon="mdi:docker"></ha-icon></div><div class="header-info"><div class="header-title">Docker</div><div class="header-subtitle">${running}/${total} running</div></div>${this._refreshButtonHtml()}</div>`;
     }
 
     html += `<div class="summary-chips">
+      ${this._config.show_header === false ? this._refreshButtonHtml(true) : ''}
       <div class="chip ${running === total ? 'chip-green' : 'chip-red'}"><ha-icon icon="mdi:checkbox-marked-circle"></ha-icon><span>${running}/${total} Running</span></div>
       <div class="chip ${totalIssues === 0 ? 'chip-green' : 'chip-red'}"><ha-icon icon="mdi:alert-circle"></ha-icon><span>${totalIssues === 0 ? 'No Issues' : totalIssues + ' Issue' + (totalIssues > 1 ? 's' : '')}</span></div>
       <div class="chip ${totalUpdates === 0 ? 'chip-green' : 'chip-amber'}"><ha-icon icon="mdi:update"></ha-icon><span>${totalUpdates === 0 ? 'All Up to Date' : totalUpdates + ' Update' + (totalUpdates > 1 ? 's' : '')}</span></div>
@@ -332,10 +366,11 @@ class DockgeCard extends HTMLElement {
       const agentParam = this._getAgentParam(serverName);
 
       const version = this._getVersion(serverName);
-      html += `<div class="server-section"><div class="server-header"><ha-icon icon="mdi:server" class="server-icon"></ha-icon><div class="server-info"><div class="server-name">${serverName}${version ? '<span class="server-version">v' + version + '</span>' : ''}</div><div class="server-status">${ad.running_containers}/${ad.total_containers} running${updates > 0 ? ' · ' + updates + ' update' + (updates > 1 ? 's' : '') : ''}</div></div></div><div class="stack-chips">`;
+      html += `<div class="server-section"><div class="server-header"><ha-icon icon="mdi:server" class="server-icon"></ha-icon><div class="server-info"><div class="server-name">${serverName}${version ? '<span class="server-version">v' + version + '</span>' : ''}</div><div class="server-status">${ad.running_containers}/${ad.total_containers - (ignoredByServer[serverName] || 0)} running${updates > 0 ? ' · ' + updates + ' update' + (updates > 1 ? 's' : '') : ''}</div></div></div><div class="stack-chips">`;
 
       for (const stackName of stacks) {
-        const containers = this._getContainersForStack(stackName, serverName);
+        const containers = this._getContainersForStack(stackName, serverName)
+          .filter(c => !this._isIgnoredContainer(c, statuses));
         const color = this._getStackColor(containers);
         const isProcessing = this._isStackProcessing(stackName, serverName);
         const chipColor = isProcessing ? STATUS_COLORS.processing : color;
@@ -348,6 +383,10 @@ class DockgeCard extends HTMLElement {
 
     this.shadowRoot.innerHTML = `<ha-card>${html}</ha-card>`;
 
+    this.shadowRoot.querySelectorAll('.refresh-btn').forEach(btn => {
+      btn.addEventListener('click', () => this._refresh());
+    });
+
     this.shadowRoot.querySelectorAll('.stack-chip').forEach(chip => {
       chip.addEventListener('click', e => {
         const el = e.currentTarget;
@@ -356,12 +395,52 @@ class DockgeCard extends HTMLElement {
     });
   }
 
+  // ── Manual refresh ──
+  // The integration only polls every few minutes. homeassistant.update_entity on any Dockge
+  // entity makes it poll right now (one coordinator serves them all).
+
+  _getRefreshEntity() {
+    for (const id in this._hass.states) {
+      if (id.match(/^sensor\.dockge_server_.+_summary$/) && !id.endsWith('_global_summary')) return id;
+    }
+    for (const id in this._hass.states) {
+      const a = this._hass.states[id].attributes;
+      if (id.startsWith('binary_sensor.') && a && a.stack_name && a.agent_name) return id;
+    }
+    return null;
+  }
+
+  _refreshButtonHtml(asChip = false) {
+    const spin = this._refreshing ? ' spinning' : '';
+    if (asChip) return `<div class="chip refresh-btn${spin}" role="button" title="Refresh now"><ha-icon icon="mdi:refresh"></ha-icon><span>Refresh</span></div>`;
+    return `<div class="refresh-btn${spin}" role="button" title="Refresh now"><ha-icon icon="mdi:refresh"></ha-icon></div>`;
+  }
+
+  async _refresh() {
+    const entityId = this._getRefreshEntity();
+    if (this._refreshing || !entityId) return;
+    this._refreshing = true;
+    this._renderCard();
+    try {
+      await this._hass.callService('homeassistant', 'update_entity', { entity_id: entityId });
+    } catch (e) {
+      console.error('dockge-card: refresh failed', e);
+    } finally {
+      setTimeout(() => { this._refreshing = false; this._renderCard(); }, 600);
+    }
+  }
+
   _getCardStyles() {
     return `
       :host { --chip-radius: 18px; }
       ha-card { padding: 0; overflow: hidden; background: none; box-shadow: none; }
       .header { display: flex; align-items: center; gap: 12px; padding: 16px 16px 8px; }
       .header-icon { width: 40px; height: 40px; border-radius: 50%; background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.2); display: flex; align-items: center; justify-content: center; }
+      .refresh-btn { margin-left: auto; width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--secondary-text-color); -webkit-tap-highlight-color: transparent; }
+      .refresh-btn:hover { background: rgba(127,127,127,0.15); }
+      .chip.refresh-btn { width: auto; height: auto; border-radius: var(--chip-radius); margin-left: 0; gap: 6px; color: var(--primary-text-color); background: rgba(127,127,127,0.15); }
+      .refresh-btn.spinning ha-icon { animation: dockgeSpin 0.8s linear infinite; }
+      @keyframes dockgeSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       .header-icon ha-icon { color: var(--primary-color); --mdc-icon-size: 24px; }
       .header-title { font-size: 18px; font-weight: 500; color: var(--primary-text-color); }
       .header-subtitle { font-size: 13px; color: var(--secondary-text-color); }
