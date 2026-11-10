@@ -140,6 +140,28 @@ class DockgeCard extends HTMLElement {
     return containers.sort((a, b) => (a.attributes.container_name || '').localeCompare(b.attributes.container_name || ''));
   }
 
+  // Dockge's own stack status (stack-level binary_sensor, attribute `status`). Dockge leaves
+  // services labelled `dockge.status.ignore: true` out of it, so a stack whose status is plain
+  // "running" has no *relevant* exited containers. Keyed "<server>|<stack>".
+  _getStackStatuses() {
+    const statuses = {};
+    for (const id in this._hass.states) {
+      if (!id.startsWith('binary_sensor.')) continue;
+      const a = this._hass.states[id].attributes;
+      if (a && a.stack_name && a.agent_name && typeof a.status === 'string') {
+        statuses[`${a.agent_name}|${a.stack_name}`] = a.status;
+      }
+    }
+    return statuses;
+  }
+
+  // An exited container Dockge is told to ignore (e.g. a one-shot init job). Only "exited" is
+  // ever ignored: restarting/unhealthy/etc. containers still count.
+  _isIgnoredContainer(c, statuses) {
+    const a = c.attributes || {};
+    return c.state === 'exited' && statuses[`${a.agent_name}|${a.stack_name}`] === 'running';
+  }
+
   _getStackColor(containers) {
     if (containers.length === 0) return STATUS_COLORS.unknown;
     if (containers.some(c => c.attributes.health === 'unhealthy')) return STATUS_COLORS.unhealthy;
@@ -299,18 +321,29 @@ class DockgeCard extends HTMLElement {
     }
 
     const agents = globalSummary.attributes.agents;
-    const total = globalSummary.attributes.total_containers || 0;
+    // Ignored containers count towards neither side (they are not running, and not a problem).
+    // total/running are adjusted after the loop below has counted them.
+    let total = globalSummary.attributes.total_containers || 0;
     const running = globalSummary.attributes.running_containers || 0;
 
+    const statuses = this._getStackStatuses();
+    const ignoredByServer = {};
+    let ignoredTotal = 0;
     let totalIssues = 0;
     let totalUpdates = 0;
     for (const id in this._hass.states) {
       const s = this._hass.states[id];
       if (s.attributes && s.attributes.icon === 'mdi:docker' && id.startsWith('sensor.') && s.attributes.stack_name) {
+        if (this._isIgnoredContainer(s, statuses)) {
+          ignoredTotal++;
+          ignoredByServer[s.attributes.agent_name] = (ignoredByServer[s.attributes.agent_name] || 0) + 1;
+          continue;
+        }
         if (s.state !== 'running') totalIssues++;
         if (s.attributes.health === 'unhealthy') totalIssues++;
       }
     }
+    total -= ignoredTotal;
     for (const name in agents) totalUpdates += this._getUpdatesAvailable(name);
 
     let html = `<style>${this._getCardStyles()}</style>`;
@@ -332,10 +365,11 @@ class DockgeCard extends HTMLElement {
       const agentParam = this._getAgentParam(serverName);
 
       const version = this._getVersion(serverName);
-      html += `<div class="server-section"><div class="server-header"><ha-icon icon="mdi:server" class="server-icon"></ha-icon><div class="server-info"><div class="server-name">${serverName}${version ? '<span class="server-version">v' + version + '</span>' : ''}</div><div class="server-status">${ad.running_containers}/${ad.total_containers} running${updates > 0 ? ' · ' + updates + ' update' + (updates > 1 ? 's' : '') : ''}</div></div></div><div class="stack-chips">`;
+      html += `<div class="server-section"><div class="server-header"><ha-icon icon="mdi:server" class="server-icon"></ha-icon><div class="server-info"><div class="server-name">${serverName}${version ? '<span class="server-version">v' + version + '</span>' : ''}</div><div class="server-status">${ad.running_containers}/${ad.total_containers - (ignoredByServer[serverName] || 0)} running${updates > 0 ? ' · ' + updates + ' update' + (updates > 1 ? 's' : '') : ''}</div></div></div><div class="stack-chips">`;
 
       for (const stackName of stacks) {
-        const containers = this._getContainersForStack(stackName, serverName);
+        const containers = this._getContainersForStack(stackName, serverName)
+          .filter(c => !this._isIgnoredContainer(c, statuses));
         const color = this._getStackColor(containers);
         const isProcessing = this._isStackProcessing(stackName, serverName);
         const chipColor = isProcessing ? STATUS_COLORS.processing : color;
