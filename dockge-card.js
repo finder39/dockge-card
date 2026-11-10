@@ -349,10 +349,11 @@ class DockgeCard extends HTMLElement {
     let html = `<style>${this._getCardStyles()}</style>`;
 
     if (this._config.show_header !== false) {
-      html += `<div class="header"><div class="header-icon"><ha-icon icon="mdi:docker"></ha-icon></div><div class="header-info"><div class="header-title">Docker</div><div class="header-subtitle">${running}/${total} running</div></div></div>`;
+      html += `<div class="header"><div class="header-icon"><ha-icon icon="mdi:docker"></ha-icon></div><div class="header-info"><div class="header-title">Docker</div><div class="header-subtitle">${running}/${total} running</div></div>${this._refreshButtonHtml()}</div>`;
     }
 
     html += `<div class="summary-chips">
+      ${this._config.show_header === false ? this._refreshButtonHtml(true) : ''}
       <div class="chip ${running === total ? 'chip-green' : 'chip-red'}"><ha-icon icon="mdi:checkbox-marked-circle"></ha-icon><span>${running}/${total} Running</span></div>
       <div class="chip ${totalIssues === 0 ? 'chip-green' : 'chip-red'}"><ha-icon icon="mdi:alert-circle"></ha-icon><span>${totalIssues === 0 ? 'No Issues' : totalIssues + ' Issue' + (totalIssues > 1 ? 's' : '')}</span></div>
       <div class="chip ${totalUpdates === 0 ? 'chip-green' : 'chip-amber'}"><ha-icon icon="mdi:update"></ha-icon><span>${totalUpdates === 0 ? 'All Up to Date' : totalUpdates + ' Update' + (totalUpdates > 1 ? 's' : '')}</span></div>
@@ -382,6 +383,10 @@ class DockgeCard extends HTMLElement {
 
     this.shadowRoot.innerHTML = `<ha-card>${html}</ha-card>`;
 
+    this.shadowRoot.querySelectorAll('.refresh-btn').forEach(btn => {
+      btn.addEventListener('click', () => this._refresh());
+    });
+
     this.shadowRoot.querySelectorAll('.stack-chip').forEach(chip => {
       chip.addEventListener('click', e => {
         const el = e.currentTarget;
@@ -390,12 +395,52 @@ class DockgeCard extends HTMLElement {
     });
   }
 
+  // ── Manual refresh ──
+  // The integration only polls every few minutes. homeassistant.update_entity on any Dockge
+  // entity makes it poll right now (one coordinator serves them all).
+
+  _getRefreshEntity() {
+    for (const id in this._hass.states) {
+      if (id.match(/^sensor\.dockge_server_.+_summary$/) && !id.endsWith('_global_summary')) return id;
+    }
+    for (const id in this._hass.states) {
+      const a = this._hass.states[id].attributes;
+      if (id.startsWith('binary_sensor.') && a && a.stack_name && a.agent_name) return id;
+    }
+    return null;
+  }
+
+  _refreshButtonHtml(asChip = false) {
+    const spin = this._refreshing ? ' spinning' : '';
+    if (asChip) return `<div class="chip refresh-btn${spin}" role="button" title="Refresh now"><ha-icon icon="mdi:refresh"></ha-icon><span>Refresh</span></div>`;
+    return `<div class="refresh-btn${spin}" role="button" title="Refresh now"><ha-icon icon="mdi:refresh"></ha-icon></div>`;
+  }
+
+  async _refresh() {
+    const entityId = this._getRefreshEntity();
+    if (this._refreshing || !entityId) return;
+    this._refreshing = true;
+    this._renderCard();
+    try {
+      await this._hass.callService('homeassistant', 'update_entity', { entity_id: entityId });
+    } catch (e) {
+      console.error('dockge-card: refresh failed', e);
+    } finally {
+      setTimeout(() => { this._refreshing = false; this._renderCard(); }, 600);
+    }
+  }
+
   _getCardStyles() {
     return `
       :host { --chip-radius: 18px; }
       ha-card { padding: 0; overflow: hidden; background: none; box-shadow: none; }
       .header { display: flex; align-items: center; gap: 12px; padding: 16px 16px 8px; }
       .header-icon { width: 40px; height: 40px; border-radius: 50%; background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.2); display: flex; align-items: center; justify-content: center; }
+      .refresh-btn { margin-left: auto; width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--secondary-text-color); -webkit-tap-highlight-color: transparent; }
+      .refresh-btn:hover { background: rgba(127,127,127,0.15); }
+      .chip.refresh-btn { width: auto; height: auto; border-radius: var(--chip-radius); margin-left: 0; gap: 6px; color: var(--primary-text-color); background: rgba(127,127,127,0.15); }
+      .refresh-btn.spinning ha-icon { animation: dockgeSpin 0.8s linear infinite; }
+      @keyframes dockgeSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       .header-icon ha-icon { color: var(--primary-color); --mdc-icon-size: 24px; }
       .header-title { font-size: 18px; font-weight: 500; color: var(--primary-text-color); }
       .header-subtitle { font-size: 13px; color: var(--secondary-text-color); }
